@@ -109,16 +109,20 @@ class ProcessManager:
         return self.db.update_process_status(name, "stopped")
 
     def restart(self, name: str) -> Process:
-        """Restart a process.
+        """Restart a process, or start a stopped process.
+
+        If the process is running, it will be stopped and restarted.
+        If the process is stopped, it will be started.
 
         Args:
             name: Process name
 
         Returns:
-            New process record
+            Process record
 
         Raises:
             ValueError: If process not found
+            RuntimeError: If process fails to start
         """
         process = self.db.get_process_by_name(name)
         if not process:
@@ -128,6 +132,9 @@ class ProcessManager:
         if process.status == "running" and self._is_process_running(process.pid):
             self._kill_process(process.pid)
             remove_pid_file(name)
+
+        # Delete old record so start() can create a fresh one
+        self.db.delete_process(name)
 
         # Start again
         return self.start(process.name, process.command, process.working_dir)

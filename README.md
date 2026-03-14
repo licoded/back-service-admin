@@ -30,6 +30,7 @@ procman start "python myscript.py" --name myapp
 procman start "./myscript.sh" --name myscript --cwd /path/to/dir
 procman start "uv run main.py" --name webapp
 procman start "python worker.py" --name worker --autostart
+procman start "python worker.py" --name worker --autostart --require-network
 ```
 
 ### List all processes
@@ -58,6 +59,7 @@ Enable autostart only for selected processes:
 ```bash
 procman autostart enable myapp
 procman autostart disable myapp
+procman autostart enable myapp --require-network --network-stable-seconds 20
 ```
 
 Or configure it when starting the process:
@@ -69,6 +71,9 @@ procman start "python worker.py" --name worker --autostart
 Current platform support:
 - macOS: supported via per-user `launchd` agents
 - Ubuntu 20.04: planned
+
+For network-dependent tasks, autostart can wait until outbound connectivity has
+been stable before restoring the process.
 
 ### Stop a process
 

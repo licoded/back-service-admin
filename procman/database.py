@@ -17,6 +17,8 @@ class Process:
     working_dir: Optional[str]
     pid: Optional[int]
     autostart: bool
+    require_network: bool
+    network_stable_seconds: int
     status: str
     created_at: str
     updated_at: str
@@ -51,8 +53,17 @@ class Database:
             row["name"] for row in self.conn.execute("PRAGMA table_info(processes)").fetchall()
         }
         if "autostart" not in columns:
-            self.conn.execute(
+            self._add_column_if_missing(
                 "ALTER TABLE processes ADD COLUMN autostart INTEGER NOT NULL DEFAULT 0"
+            )
+        if "require_network" not in columns:
+            self._add_column_if_missing(
+                "ALTER TABLE processes ADD COLUMN require_network INTEGER NOT NULL DEFAULT 0"
+            )
+        if "network_stable_seconds" not in columns:
+            self._add_column_if_missing(
+                "ALTER TABLE processes "
+                "ADD COLUMN network_stable_seconds INTEGER NOT NULL DEFAULT 15"
             )
 
     def create_process(
@@ -62,15 +73,35 @@ class Database:
         working_dir: Optional[str] = None,
         pid: Optional[int] = None,
         autostart: bool = False,
+        require_network: bool = False,
+        network_stable_seconds: int = 15,
         status: str = "running",
     ) -> Process:
         """Create a new process record."""
         cursor = self.conn.execute(
             """
-            INSERT INTO processes (name, command, working_dir, pid, autostart, status)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO processes (
+                name,
+                command,
+                working_dir,
+                pid,
+                autostart,
+                require_network,
+                network_stable_seconds,
+                status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (name, command, working_dir, pid, int(autostart), status),
+            (
+                name,
+                command,
+                working_dir,
+                pid,
+                int(autostart),
+                int(require_network),
+                network_stable_seconds,
+                status,
+            ),
         )
         self.conn.commit()
         return self.get_process_by_id(cursor.lastrowid)
@@ -160,6 +191,26 @@ class Database:
         self.conn.commit()
         return self.get_process_by_name(name) if cursor.rowcount > 0 else None
 
+    def update_process_autostart_settings(
+        self,
+        name: str,
+        enabled: bool,
+        require_network: bool,
+        network_stable_seconds: int,
+    ) -> Optional[Process]:
+        """Update autostart-related configuration."""
+        cursor = self.conn.execute(
+            """
+            UPDATE processes
+            SET autostart = ?, require_network = ?, network_stable_seconds = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE name = ?
+            """,
+            (int(enabled), int(require_network), network_stable_seconds, name),
+        )
+        self.conn.commit()
+        return self.get_process_by_name(name) if cursor.rowcount > 0 else None
+
     def delete_process(self, name: str) -> bool:
         """Delete a process by name."""
         cursor = self.conn.execute("DELETE FROM processes WHERE name = ?", (name,))
@@ -176,4 +227,14 @@ class Database:
         """Convert a SQLite row to a Process object."""
         data = dict(row)
         data["autostart"] = bool(data.get("autostart", 0))
+        data["require_network"] = bool(data.get("require_network", 0))
+        data["network_stable_seconds"] = int(data.get("network_stable_seconds", 15))
         return Process(**data)
+
+    def _add_column_if_missing(self, sql: str) -> None:
+        """Best-effort column migration that tolerates concurrent initializers."""
+        try:
+            self.conn.execute(sql)
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" not in str(e).lower():
+                raise

@@ -41,12 +41,30 @@ def start(
         "--autostart/--no-autostart",
         help="Automatically restore this process on supported platforms",
     ),
+    require_network: bool = typer.Option(
+        False,
+        "--require-network/--no-require-network",
+        help="Wait for outbound network before autostart restores this process",
+    ),
+    network_stable_seconds: int = typer.Option(
+        15,
+        "--network-stable-seconds",
+        min=0,
+        help="Seconds that network must remain reachable before autostart restores",
+    ),
 ) -> None:
     """Start a new process and run it in the background."""
     manager = ProcessManager()
 
     try:
-        process = manager.start(name, script, cwd, autostart)
+        process = manager.start(
+            name,
+            script,
+            cwd,
+            autostart,
+            require_network,
+            network_stable_seconds,
+        )
         console.print(
             f"[green]✓[/green] Process '{process.name}' started successfully (PID: {process.pid})"
         )
@@ -214,12 +232,29 @@ def delete(
 
 
 @autostart_app.command("enable")
-def enable_autostart(name: str = typer.Argument(..., help="Name of the process")) -> None:
+def enable_autostart(
+    name: str = typer.Argument(..., help="Name of the process"),
+    require_network: Optional[bool] = typer.Option(
+        None,
+        "--require-network/--no-require-network",
+        help="Override whether autostart must wait for outbound network",
+    ),
+    network_stable_seconds: Optional[int] = typer.Option(
+        None,
+        "--network-stable-seconds",
+        min=0,
+        help="Override the autostart network stability wait in seconds",
+    ),
+) -> None:
     """Enable autostart for a process."""
     manager = ProcessManager()
 
     try:
-        process = manager.enable_autostart(name)
+        process = manager.enable_autostart(
+            name,
+            require_network=require_network,
+            network_stable_seconds=network_stable_seconds,
+        )
         console.print(f"[green]✓[/green] Enabled autostart for '{process.name}'")
     except (RuntimeError, ValueError) as e:
         console.print(f"[red]✗[/red] {e}")
@@ -250,6 +285,28 @@ def autostart_run(name: str = typer.Argument(..., help="Name of the process")) -
 
     try:
         manager.ensure_running(name)
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        raise typer.Exit(1)
+    except RuntimeError as e:
+        console.print(f"[red]✗[/red] {e}")
+        raise typer.Exit(1)
+    finally:
+        manager.close()
+
+
+@app.command("autostart-watch", hidden=True)
+def autostart_watch(name: str = typer.Argument(..., help="Name of the process")) -> None:
+    """Internal watchdog used by platform autostart integrations."""
+    manager = ProcessManager()
+
+    try:
+        import time
+
+        while True:
+            manager.wait_for_start_conditions(name)
+            manager.ensure_running(name)
+            time.sleep(15)
     except ValueError as e:
         console.print(f"[red]✗[/red] {e}")
         raise typer.Exit(1)

@@ -3,8 +3,10 @@
 import os
 import platform
 import re
+import socket
 import subprocess
 import sys
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +18,8 @@ class AutostartProcess:
 
     name: str
     working_dir: str | None
+    require_network: bool
+    network_stable_seconds: int
 
 
 class AutostartBackend:
@@ -59,7 +63,7 @@ class LaunchdAutostartBackend(AutostartBackend):
         self._append_key_array(
             root_dict,
             "ProgramArguments",
-            [sys.executable, "-m", "procman", "autostart-run", process.name],
+            [sys.executable, "-m", "procman", "autostart-watch", process.name],
         )
         self._append_key_value(root_dict, "RunAtLoad", True)
         self._append_key_value(root_dict, "KeepAlive", True)
@@ -134,3 +138,32 @@ def get_autostart_backend() -> AutostartBackend:
     if system == "Darwin":
         return LaunchdAutostartBackend()
     return UnsupportedAutostartBackend()
+
+
+def wait_for_network_stability(
+    stable_seconds: int,
+    timeout_seconds: int = 2,
+    check_interval_seconds: int = 5,
+) -> None:
+    """Block until outbound network has remained reachable long enough."""
+    stable_deadline = time.monotonic() + max(stable_seconds, 0)
+
+    while True:
+        if _has_network(timeout_seconds):
+            if time.monotonic() >= stable_deadline:
+                return
+        else:
+            stable_deadline = time.monotonic() + max(stable_seconds, 0)
+
+        time.sleep(check_interval_seconds)
+
+
+def _has_network(timeout_seconds: int) -> bool:
+    """Check whether basic outbound network connectivity is available."""
+    for host, port in [("1.1.1.1", 53), ("8.8.8.8", 53)]:
+        try:
+            with socket.create_connection((host, port), timeout=timeout_seconds):
+                return True
+        except OSError:
+            continue
+    return False

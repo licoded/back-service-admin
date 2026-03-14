@@ -6,7 +6,11 @@ from typing import Optional
 
 import psutil
 
-from procman.autostart import AutostartProcess, get_autostart_backend
+from procman.autostart import (
+    AutostartProcess,
+    get_autostart_backend,
+    wait_for_network_stability,
+)
 from procman.config import LOGS_DIR
 from procman.daemonize import daemonize_process, remove_pid_file
 from procman.database import Database, Process
@@ -26,6 +30,8 @@ class ProcessManager:
         command: str,
         working_dir: Optional[str] = None,
         autostart: bool = False,
+        require_network: bool = False,
+        network_stable_seconds: int = 15,
     ) -> Process:
         """Start a new process.
 
@@ -58,7 +64,16 @@ class ProcessManager:
             pid = daemonize_process(name, command, working_dir, log_path)
         except Exception as e:
             # Create failed record
-            self.db.create_process(name, command, working_dir, None, False, "failed")
+            self.db.create_process(
+                name,
+                command,
+                working_dir,
+                None,
+                False,
+                False,
+                15,
+                "failed",
+            )
             raise RuntimeError(f"Failed to start process: {e}")
 
         # Give process a moment to start
@@ -69,10 +84,19 @@ class ProcessManager:
             raise RuntimeError("Process failed to start or exited immediately")
 
         # Create database record
-        process = self.db.create_process(name, command, working_dir, pid, autostart, "running")
+        process = self.db.create_process(
+            name,
+            command,
+            working_dir,
+            pid,
+            autostart,
+            require_network,
+            network_stable_seconds,
+            "running",
+        )
 
         if autostart:
-            self.enable_autostart(name)
+            self.enable_autostart(name, require_network, network_stable_seconds)
             process = self.db.get_process_by_name(name)
 
         return process
@@ -141,6 +165,8 @@ class ProcessManager:
             process.command,
             process.working_dir,
             process.autostart,
+            process.require_network,
+            process.network_stable_seconds,
         )
 
     def delete(self, name: str) -> bool:
@@ -168,16 +194,40 @@ class ProcessManager:
         # Delete from database
         return self.db.delete_process(name)
 
-    def enable_autostart(self, name: str) -> Process:
+    def enable_autostart(
+        self,
+        name: str,
+        require_network: Optional[bool] = None,
+        network_stable_seconds: Optional[int] = None,
+    ) -> Process:
         """Enable autostart for a process."""
         process = self.db.get_process_by_name(name)
         if not process:
             raise ValueError(f"Process '{name}' not found")
 
-        self.autostart_backend.enable(
-            AutostartProcess(name=process.name, working_dir=process.working_dir)
+        resolved_require_network = (
+            process.require_network if require_network is None else require_network
         )
-        updated = self.db.update_process_autostart(name, True)
+        resolved_stable_seconds = (
+            process.network_stable_seconds
+            if network_stable_seconds is None
+            else network_stable_seconds
+        )
+
+        self.autostart_backend.enable(
+            AutostartProcess(
+                name=process.name,
+                working_dir=process.working_dir,
+                require_network=resolved_require_network,
+                network_stable_seconds=resolved_stable_seconds,
+            )
+        )
+        updated = self.db.update_process_autostart_settings(
+            name,
+            True,
+            resolved_require_network,
+            resolved_stable_seconds,
+        )
         if updated is None:
             raise RuntimeError(f"Failed to update autostart for '{name}'")
         return updated
@@ -189,7 +239,12 @@ class ProcessManager:
             raise ValueError(f"Process '{name}' not found")
 
         self.autostart_backend.disable(name)
-        updated = self.db.update_process_autostart(name, False)
+        updated = self.db.update_process_autostart_settings(
+            name,
+            False,
+            process.require_network,
+            process.network_stable_seconds,
+        )
         if updated is None:
             raise RuntimeError(f"Failed to update autostart for '{name}'")
         return updated
@@ -200,6 +255,17 @@ class ProcessManager:
         if process.status == "running":
             return process
         return self.restart(name)
+
+    def wait_for_start_conditions(self, name: str) -> Process:
+        """Wait for any configured preconditions before restoring a process."""
+        process = self.db.get_process_by_name(name)
+        if not process:
+            raise ValueError(f"Process '{name}' not found")
+
+        if process.require_network:
+            wait_for_network_stability(process.network_stable_seconds)
+
+        return process
 
     def get_status(self, name: str) -> Process:
         """Get status of a process.

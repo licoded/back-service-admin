@@ -31,6 +31,46 @@ def _format_local_timestamp(value: str) -> str:
         return value[:19]
 
 
+def _render_process_list() -> None:
+    """Render the managed process list."""
+    manager = ProcessManager()
+
+    try:
+        processes = manager.list_all()
+
+        if not processes:
+            console.print("[yellow]No processes managed[/yellow]")
+            return
+
+        table = Table(title="Managed Processes")
+        table.add_column("Name", style="cyan")
+        table.add_column("Status", style="bold")
+        table.add_column("PID", style="green")
+        table.add_column("Auto", style="magenta")
+        table.add_column("Command", style="white")
+        table.add_column("Created", style="dim")
+
+        for proc in processes:
+            status_color = {
+                "running": "green",
+                "stopped": "yellow",
+                "failed": "red",
+            }.get(proc.status, "white")
+
+            table.add_row(
+                proc.name,
+                f"[{status_color}]{proc.status}[/{status_color}]",
+                str(proc.pid) if proc.pid else "-",
+                "yes" if proc.autostart else "no",
+                proc.command[:50] + "..." if len(proc.command) > 50 else proc.command,
+                _format_local_timestamp(proc.created_at),
+            )
+
+        console.print(table)
+    finally:
+        manager.close()
+
+
 @app.command()
 def start(
     script: str = typer.Argument(..., help="Command or script to execute"),
@@ -117,43 +157,39 @@ def restart(
 @app.command("list")
 def list_processes() -> None:
     """List all managed processes."""
+    _render_process_list()
+
+
+@app.command("ls")
+def list_processes_alias() -> None:
+    """Alias for list."""
+    _render_process_list()
+
+
+@app.command()
+def show(name: str = typer.Argument(..., help="Name of the process")) -> None:
+    """Show full details for a process, including the complete command."""
     manager = ProcessManager()
 
     try:
-        processes = manager.list_all()
-
-        if not processes:
-            console.print("[yellow]No processes managed[/yellow]")
-            return
-
-        # Create table
-        table = Table(title="Managed Processes")
-        table.add_column("Name", style="cyan")
-        table.add_column("Status", style="bold")
-        table.add_column("PID", style="green")
-        table.add_column("Auto", style="magenta")
-        table.add_column("Command", style="white")
-        table.add_column("Created", style="dim")
-
-        for proc in processes:
-            # Color code status
-            status_color = {
-                "running": "green",
-                "stopped": "yellow",
-                "failed": "red",
-            }.get(proc.status, "white")
-
-            table.add_row(
-                proc.name,
-                f"[{status_color}]{proc.status}[/{status_color}]",
-                str(proc.pid) if proc.pid else "-",
-                "yes" if proc.autostart else "no",
-                proc.command[:50] + "..." if len(proc.command) > 50 else proc.command,
-                _format_local_timestamp(proc.created_at),
-            )
-
+        process = manager.get_status(name)
+        table = Table(show_header=False, box=None)
+        table.add_column("Field", style="cyan", no_wrap=True)
+        table.add_column("Value", style="white")
+        table.add_row("Name", process.name)
+        table.add_row("Status", process.status)
+        table.add_row("PID", str(process.pid) if process.pid else "-")
+        table.add_row("Autostart", "yes" if process.autostart else "no")
+        table.add_row("Require Network", "yes" if process.require_network else "no")
+        table.add_row("Network Stable", str(process.network_stable_seconds))
+        table.add_row("Working Dir", process.working_dir or "-")
+        table.add_row("Created", _format_local_timestamp(process.created_at))
+        table.add_row("Updated", _format_local_timestamp(process.updated_at))
+        table.add_row("Command", process.command)
         console.print(table)
-
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        raise typer.Exit(1)
     finally:
         manager.close()
 

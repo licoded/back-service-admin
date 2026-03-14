@@ -37,6 +37,13 @@ procman start "python worker.py" --name worker --autostart --require-network
 
 ```bash
 procman list
+procman ls
+```
+
+### Show one process
+
+```bash
+procman show myapp
 ```
 
 ### View logs

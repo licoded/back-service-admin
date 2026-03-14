@@ -14,6 +14,8 @@ app = typer.Typer(
     help="Simple process manager for shell scripts and executables (no sudo required)",
     add_completion=False,
 )
+autostart_app = typer.Typer(help="Manage autostart configuration for a process")
+app.add_typer(autostart_app, name="autostart")
 
 console = Console()
 
@@ -34,12 +36,17 @@ def start(
     script: str = typer.Argument(..., help="Command or script to execute"),
     name: str = typer.Option(..., "--name", "-n", help="Unique name for the process"),
     cwd: Optional[str] = typer.Option(None, "--cwd", "-c", help="Working directory"),
+    autostart: bool = typer.Option(
+        False,
+        "--autostart/--no-autostart",
+        help="Automatically restore this process on supported platforms",
+    ),
 ) -> None:
     """Start a new process and run it in the background."""
     manager = ProcessManager()
 
     try:
-        process = manager.start(name, script, cwd)
+        process = manager.start(name, script, cwd, autostart)
         console.print(
             f"[green]✓[/green] Process '{process.name}' started successfully (PID: {process.pid})"
         )
@@ -106,6 +113,7 @@ def list_processes() -> None:
         table.add_column("Name", style="cyan")
         table.add_column("Status", style="bold")
         table.add_column("PID", style="green")
+        table.add_column("Auto", style="magenta")
         table.add_column("Command", style="white")
         table.add_column("Created", style="dim")
 
@@ -121,6 +129,7 @@ def list_processes() -> None:
                 proc.name,
                 f"[{status_color}]{proc.status}[/{status_color}]",
                 str(proc.pid) if proc.pid else "-",
+                "yes" if proc.autostart else "no",
                 proc.command[:50] + "..." if len(proc.command) > 50 else proc.command,
                 _format_local_timestamp(proc.created_at),
             )
@@ -198,6 +207,53 @@ def delete(
         else:
             console.print(f"[yellow]Process '{name}' not found[/yellow]")
     except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        raise typer.Exit(1)
+    finally:
+        manager.close()
+
+
+@autostart_app.command("enable")
+def enable_autostart(name: str = typer.Argument(..., help="Name of the process")) -> None:
+    """Enable autostart for a process."""
+    manager = ProcessManager()
+
+    try:
+        process = manager.enable_autostart(name)
+        console.print(f"[green]✓[/green] Enabled autostart for '{process.name}'")
+    except (RuntimeError, ValueError) as e:
+        console.print(f"[red]✗[/red] {e}")
+        raise typer.Exit(1)
+    finally:
+        manager.close()
+
+
+@autostart_app.command("disable")
+def disable_autostart(name: str = typer.Argument(..., help="Name of the process")) -> None:
+    """Disable autostart for a process."""
+    manager = ProcessManager()
+
+    try:
+        process = manager.disable_autostart(name)
+        console.print(f"[green]✓[/green] Disabled autostart for '{process.name}'")
+    except (RuntimeError, ValueError) as e:
+        console.print(f"[red]✗[/red] {e}")
+        raise typer.Exit(1)
+    finally:
+        manager.close()
+
+
+@app.command("autostart-run", hidden=True)
+def autostart_run(name: str = typer.Argument(..., help="Name of the process")) -> None:
+    """Internal command used by platform autostart integrations."""
+    manager = ProcessManager()
+
+    try:
+        manager.ensure_running(name)
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        raise typer.Exit(1)
+    except RuntimeError as e:
         console.print(f"[red]✗[/red] {e}")
         raise typer.Exit(1)
     finally:

@@ -1,22 +1,15 @@
 """Core process management logic for procman."""
 
-import logging
-import os
-import sys
 import time
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
 import psutil
 
-from procman.config import (
-    BACKUP_COUNT,
-    LOGS_DIR,
-    MAX_LOG_BYTES,
-)
+from procman.autostart import AutostartProcess, get_autostart_backend
+from procman.config import LOGS_DIR
+from procman.daemonize import daemonize_process, remove_pid_file
 from procman.database import Database, Process
-from procman.daemonize import daemonize_process, read_pid_file, remove_pid_file
 
 
 class ProcessManager:
@@ -25,12 +18,14 @@ class ProcessManager:
     def __init__(self) -> None:
         """Initialize the process manager with database connection."""
         self.db = Database()
+        self.autostart_backend = get_autostart_backend()
 
     def start(
         self,
         name: str,
         command: str,
         working_dir: Optional[str] = None,
+        autostart: bool = False,
     ) -> Process:
         """Start a new process.
 
@@ -63,7 +58,7 @@ class ProcessManager:
             pid = daemonize_process(name, command, working_dir, log_path)
         except Exception as e:
             # Create failed record
-            self.db.create_process(name, command, working_dir, None, "failed")
+            self.db.create_process(name, command, working_dir, None, False, "failed")
             raise RuntimeError(f"Failed to start process: {e}")
 
         # Give process a moment to start
@@ -71,10 +66,14 @@ class ProcessManager:
 
         # Verify process started
         if not self._is_process_running(pid):
-            raise RuntimeError(f"Process failed to start or exited immediately")
+            raise RuntimeError("Process failed to start or exited immediately")
 
         # Create database record
-        process = self.db.create_process(name, command, working_dir, pid, "running")
+        process = self.db.create_process(name, command, working_dir, pid, autostart, "running")
+
+        if autostart:
+            self.enable_autostart(name)
+            process = self.db.get_process_by_name(name)
 
         return process
 
@@ -137,7 +136,12 @@ class ProcessManager:
         self.db.delete_process(name)
 
         # Start again
-        return self.start(process.name, process.command, process.working_dir)
+        return self.start(
+            process.name,
+            process.command,
+            process.working_dir,
+            process.autostart,
+        )
 
     def delete(self, name: str) -> bool:
         """Delete a process from management.
@@ -163,6 +167,39 @@ class ProcessManager:
 
         # Delete from database
         return self.db.delete_process(name)
+
+    def enable_autostart(self, name: str) -> Process:
+        """Enable autostart for a process."""
+        process = self.db.get_process_by_name(name)
+        if not process:
+            raise ValueError(f"Process '{name}' not found")
+
+        self.autostart_backend.enable(
+            AutostartProcess(name=process.name, working_dir=process.working_dir)
+        )
+        updated = self.db.update_process_autostart(name, True)
+        if updated is None:
+            raise RuntimeError(f"Failed to update autostart for '{name}'")
+        return updated
+
+    def disable_autostart(self, name: str) -> Process:
+        """Disable autostart for a process."""
+        process = self.db.get_process_by_name(name)
+        if not process:
+            raise ValueError(f"Process '{name}' not found")
+
+        self.autostart_backend.disable(name)
+        updated = self.db.update_process_autostart(name, False)
+        if updated is None:
+            raise RuntimeError(f"Failed to update autostart for '{name}'")
+        return updated
+
+    def ensure_running(self, name: str) -> Process:
+        """Ensure a configured process is running."""
+        process = self.get_status(name)
+        if process.status == "running":
+            return process
+        return self.restart(name)
 
     def get_status(self, name: str) -> Process:
         """Get status of a process.

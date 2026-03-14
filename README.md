@@ -29,6 +29,7 @@ pip install procman
 procman start "python myscript.py" --name myapp
 procman start "./myscript.sh" --name myscript --cwd /path/to/dir
 procman start "uv run main.py" --name webapp
+procman start "python worker.py" --name worker --autostart
 ```
 
 ### List all processes
@@ -49,6 +50,25 @@ procman logs myapp --tail
 # Follow logs in real-time
 procman logs myapp --follow
 ```
+
+## Autostart
+
+Enable autostart only for selected processes:
+
+```bash
+procman autostart enable myapp
+procman autostart disable myapp
+```
+
+Or configure it when starting the process:
+
+```bash
+procman start "python worker.py" --name worker --autostart
+```
+
+Current platform support:
+- macOS: supported via per-user `launchd` agents
+- Ubuntu 20.04: planned
 
 ### Stop a process
 

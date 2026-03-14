@@ -2,8 +2,6 @@
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 from procman.config import DATABASE_PATH, SQLITE_CREATE_TABLE, ensure_directories
@@ -18,6 +16,7 @@ class Process:
     command: str
     working_dir: Optional[str]
     pid: Optional[int]
+    autostart: bool
     status: str
     created_at: str
     updated_at: str
@@ -43,7 +42,18 @@ class Database:
     def _create_table(self) -> None:
         """Create the processes table if it doesn't exist."""
         self.conn.execute(SQLITE_CREATE_TABLE)
+        self._migrate_schema()
         self.conn.commit()
+
+    def _migrate_schema(self) -> None:
+        """Apply lightweight forward-compatible schema migrations."""
+        columns = {
+            row["name"] for row in self.conn.execute("PRAGMA table_info(processes)").fetchall()
+        }
+        if "autostart" not in columns:
+            self.conn.execute(
+                "ALTER TABLE processes ADD COLUMN autostart INTEGER NOT NULL DEFAULT 0"
+            )
 
     def create_process(
         self,
@@ -51,15 +61,16 @@ class Database:
         command: str,
         working_dir: Optional[str] = None,
         pid: Optional[int] = None,
+        autostart: bool = False,
         status: str = "running",
     ) -> Process:
         """Create a new process record."""
         cursor = self.conn.execute(
             """
-            INSERT INTO processes (name, command, working_dir, pid, status)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO processes (name, command, working_dir, pid, autostart, status)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (name, command, working_dir, pid, status),
+            (name, command, working_dir, pid, int(autostart), status),
         )
         self.conn.commit()
         return self.get_process_by_id(cursor.lastrowid)
@@ -71,7 +82,7 @@ class Database:
             (name,),
         )
         row = cursor.fetchone()
-        return Process(**dict(row)) if row else None
+        return self._row_to_process(row) if row else None
 
     def get_process_by_id(self, process_id: int) -> Optional[Process]:
         """Get a process by its ID."""
@@ -80,12 +91,12 @@ class Database:
             (process_id,),
         )
         row = cursor.fetchone()
-        return Process(**dict(row)) if row else None
+        return self._row_to_process(row) if row else None
 
     def get_all_processes(self) -> list[Process]:
         """Get all process records."""
         cursor = self.conn.execute("SELECT * FROM processes ORDER BY created_at DESC")
-        return [Process(**dict(row)) for row in cursor.fetchall()]
+        return [self._row_to_process(row) for row in cursor.fetchall()]
 
     def get_processes_by_status(self, status: str) -> list[Process]:
         """Get all processes with a specific status."""
@@ -93,7 +104,7 @@ class Database:
             "SELECT * FROM processes WHERE status = ? ORDER BY created_at DESC",
             (status,),
         )
-        return [Process(**dict(row)) for row in cursor.fetchall()]
+        return [self._row_to_process(row) for row in cursor.fetchall()]
 
     def update_process_status(
         self,
@@ -136,6 +147,19 @@ class Database:
         self.conn.commit()
         return self.get_process_by_name(name) if cursor.rowcount > 0 else None
 
+    def update_process_autostart(self, name: str, enabled: bool) -> Optional[Process]:
+        """Update autostart configuration."""
+        cursor = self.conn.execute(
+            """
+            UPDATE processes
+            SET autostart = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE name = ?
+            """,
+            (int(enabled), name),
+        )
+        self.conn.commit()
+        return self.get_process_by_name(name) if cursor.rowcount > 0 else None
+
     def delete_process(self, name: str) -> bool:
         """Delete a process by name."""
         cursor = self.conn.execute("DELETE FROM processes WHERE name = ?", (name,))
@@ -147,3 +171,9 @@ class Database:
         if self._conn:
             self._conn.close()
             self._conn = None
+
+    def _row_to_process(self, row: sqlite3.Row) -> Process:
+        """Convert a SQLite row to a Process object."""
+        data = dict(row)
+        data["autostart"] = bool(data.get("autostart", 0))
+        return Process(**data)

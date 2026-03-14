@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS processes (
     command TEXT NOT NULL,
     working_dir TEXT,
     pid INTEGER,
+    autostart INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL CHECK(status IN ('running', 'stopped', 'failed')),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP

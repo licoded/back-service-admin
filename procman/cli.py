@@ -1,7 +1,6 @@
 """CLI interface for procman using Typer."""
 
-import sys
-from pathlib import Path
+from datetime import datetime, timezone
 from typing import Optional
 
 import typer
@@ -17,6 +16,17 @@ app = typer.Typer(
 )
 
 console = Console()
+
+
+def _format_local_timestamp(value: str) -> str:
+    """Convert a SQLite UTC timestamp to local time for display."""
+    try:
+        utc_dt = datetime.strptime(value[:19], "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc
+        )
+        return utc_dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return value[:19]
 
 
 @app.command()
@@ -112,7 +122,7 @@ def list_processes() -> None:
                 f"[{status_color}]{proc.status}[/{status_color}]",
                 str(proc.pid) if proc.pid else "-",
                 proc.command[:50] + "..." if len(proc.command) > 50 else proc.command,
-                proc.created_at[:19],  # Truncate microseconds
+                _format_local_timestamp(proc.created_at),
             )
 
         console.print(table)

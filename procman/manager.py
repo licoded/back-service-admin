@@ -69,9 +69,9 @@ class ProcessManager:
                 command,
                 working_dir,
                 None,
-                False,
-                False,
-                15,
+                autostart,
+                require_network,
+                network_stable_seconds,
                 "failed",
             )
             raise RuntimeError(f"Failed to start process: {e}")

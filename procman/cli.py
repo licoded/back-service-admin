@@ -340,9 +340,19 @@ def autostart_watch(name: str = typer.Argument(..., help="Name of the process"))
         import time
 
         while True:
+            process = manager.get_status(name)
+            if process.status != "running" and process.require_network:
+                console.print(
+                    f"[dim]autostart-watch: waiting for network stability "
+                    f"({process.network_stable_seconds}s) for '{name}'[/dim]"
+                )
             manager.wait_for_start_conditions(name)
-            manager.ensure_running(name)
-            time.sleep(15)
+            process = manager.ensure_running(name)
+            if process.status == "running":
+                console.print(
+                    f"[dim]autostart-watch: '{name}' is running (pid={process.pid})[/dim]"
+                )
+            time.sleep(5)
     except ValueError as e:
         console.print(f"[red]✗[/red] {e}")
         raise typer.Exit(1)

@@ -11,6 +11,8 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
+from procman.config import LOGS_DIR
+
 
 @dataclass
 class AutostartProcess:
@@ -72,6 +74,9 @@ class LaunchdAutostartBackend(AutostartBackend):
             "WorkingDirectory",
             process.working_dir or str(Path.home()),
         )
+        self._append_environment_variables(root_dict)
+        self._append_key_value(root_dict, "StandardOutPath", str(self._log_path(process.name)))
+        self._append_key_value(root_dict, "StandardErrorPath", str(self._log_path(process.name)))
 
         contents = ET.tostring(plist, encoding="utf-8", xml_declaration=False)
         header = (
@@ -94,12 +99,25 @@ class LaunchdAutostartBackend(AutostartBackend):
         for value in values:
             ET.SubElement(array, "string").text = value
 
+    def _append_environment_variables(self, root: ET.Element) -> None:
+        env_vars = {
+            "PATH": os.environ.get("PATH", ""),
+        }
+        ET.SubElement(root, "key").text = "EnvironmentVariables"
+        env_dict = ET.SubElement(root, "dict")
+        for key, value in env_vars.items():
+            ET.SubElement(env_dict, "key").text = key
+            ET.SubElement(env_dict, "string").text = value
+
     def _plist_path(self, name: str) -> Path:
         return self._agents_dir / f"{self._label(name)}.plist"
 
     def _label(self, name: str) -> str:
         safe_name = re.sub(r"[^A-Za-z0-9_.-]", "-", name)
         return f"com.procman.{safe_name}"
+
+    def _log_path(self, name: str) -> Path:
+        return LOGS_DIR / f"{name}.log"
 
     def _domain_target(self) -> str:
         return f"gui/{os.getuid()}"

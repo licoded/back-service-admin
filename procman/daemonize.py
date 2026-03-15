@@ -7,6 +7,16 @@ from typing import Optional
 
 from procman.config import PIDS_DIR
 
+DEFAULT_PATH_SEGMENTS = [
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+]
+
 
 def daemonize_process(
     name: str,
@@ -39,12 +49,16 @@ def daemonize_process(
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(log_path, "a")
 
+    env = os.environ.copy()
+    env["PATH"] = _build_path_env(env.get("PATH", ""))
+
     try:
         # Start the process as a new session leader (daemonizes it)
         proc = subprocess.Popen(
             command,
             shell=True,
             cwd=cwd,
+            env=env,
             stdout=log_file if log_file else subprocess.DEVNULL,
             stderr=log_file if log_file else subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
@@ -61,6 +75,15 @@ def daemonize_process(
         if log_file:
             log_file.close()
         raise RuntimeError(f"Failed to start process: {e}")
+
+
+def _build_path_env(current_path: str) -> str:
+    """Build a PATH that preserves the current environment and common binary paths."""
+    segments = [segment for segment in current_path.split(":") if segment]
+    for segment in DEFAULT_PATH_SEGMENTS:
+        if segment not in segments:
+            segments.append(segment)
+    return ":".join(segments)
 
 
 def read_pid_file(name: str) -> Optional[int]:

@@ -1,3 +1,4 @@
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
@@ -182,3 +183,62 @@ def test_enable_autostart_does_not_reset_manual_stop() -> None:
     assert updated.autostart is True
     assert updated.manual_stop is True
     assert captured["manual_stop"] is None
+
+
+def test_database_restores_from_legacy_when_primary_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    primary_db = tmp_path / "home" / "procman.db"
+    legacy_db = tmp_path / "tmp" / "procman.db"
+    primary_db.parent.mkdir(parents=True, exist_ok=True)
+    legacy_db.parent.mkdir(parents=True, exist_ok=True)
+
+    for path in (primary_db, legacy_db):
+        db = sqlite3.connect(path)
+        db.execute(
+            """
+            CREATE TABLE processes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                command TEXT NOT NULL,
+                working_dir TEXT,
+                pid INTEGER,
+                autostart INTEGER NOT NULL DEFAULT 0,
+                autostart_mode TEXT NOT NULL DEFAULT 'always',
+                require_network INTEGER NOT NULL DEFAULT 0,
+                network_stable_seconds INTEGER NOT NULL DEFAULT 15,
+                manual_stop INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        db.commit()
+        db.close()
+
+    legacy_conn = sqlite3.connect(legacy_db)
+    legacy_conn.execute(
+        """
+        INSERT INTO processes
+        (name, command, autostart, autostart_mode, status)
+        VALUES ('legacy-task', 'sleep 1', 1, 'always', 'stopped')
+        """
+    )
+    legacy_conn.commit()
+    legacy_conn.close()
+
+    monkeypatch.setattr("procman.database.DATABASE_PATH", primary_db)
+    monkeypatch.setattr("procman.database.LEGACY_DATABASE_PATH", legacy_db)
+    monkeypatch.setattr(
+        "procman.database.ensure_directories",
+        lambda: primary_db.parent.mkdir(parents=True, exist_ok=True),
+    )
+
+    db = Database()
+    try:
+        restored = db.get_process_by_name("legacy-task")
+        assert restored is not None
+        assert restored.command == "sleep 1"
+    finally:
+        db.close()

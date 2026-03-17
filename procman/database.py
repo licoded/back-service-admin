@@ -1,10 +1,17 @@
 """Database operations for procman using SQLite."""
 
+import shutil
 import sqlite3
 from dataclasses import dataclass
+from os import PathLike
 from typing import Optional
 
-from procman.config import DATABASE_PATH, SQLITE_CREATE_TABLE, ensure_directories
+from procman.config import (
+    DATABASE_PATH,
+    LEGACY_DATABASE_PATH,
+    SQLITE_CREATE_TABLE,
+    ensure_directories,
+)
 
 
 @dataclass
@@ -32,6 +39,7 @@ class Database:
     def __init__(self) -> None:
         """Initialize database and create table if needed."""
         ensure_directories()
+        self._restore_database_if_needed()
         self._conn: Optional[sqlite3.Connection] = None
 
     @property
@@ -345,3 +353,49 @@ class Database:
         except sqlite3.OperationalError as e:
             if "duplicate column name" not in str(e).lower():
                 raise
+
+    def _restore_database_if_needed(self) -> None:
+        """Best-effort migration from legacy DB path to persistent home path."""
+        if not LEGACY_DATABASE_PATH.exists():
+            return
+
+        if not DATABASE_PATH.exists():
+            shutil.copy2(LEGACY_DATABASE_PATH, DATABASE_PATH)
+            return
+
+        primary_count, primary_updated_at = self._database_freshness(DATABASE_PATH)
+        legacy_count, legacy_updated_at = self._database_freshness(LEGACY_DATABASE_PATH)
+
+        if legacy_count == 0:
+            return
+        if primary_count == 0:
+            shutil.copy2(LEGACY_DATABASE_PATH, DATABASE_PATH)
+            return
+        if legacy_updated_at > primary_updated_at:
+            shutil.copy2(LEGACY_DATABASE_PATH, DATABASE_PATH)
+
+    def _database_freshness(self, path: PathLike[str] | str) -> tuple[int, str]:
+        """Return row count and max update timestamp for a process DB."""
+        try:
+            conn = sqlite3.connect(path)
+            try:
+                table = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'processes'"
+                ).fetchone()
+                if table is None:
+                    return 0, ""
+
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(processes)")}
+                count_row = conn.execute("SELECT COUNT(*) FROM processes").fetchone()
+                count = int(count_row[0]) if count_row else 0
+
+                if "updated_at" not in columns:
+                    return count, ""
+
+                updated_row = conn.execute("SELECT MAX(updated_at) FROM processes").fetchone()
+                updated_at = str(updated_row[0] or "") if updated_row else ""
+                return count, updated_at
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return 0, ""

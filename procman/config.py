@@ -3,14 +3,16 @@
 import os
 from pathlib import Path
 
-# Use local filesystem for SQLite database to avoid NFS locking issues
-LOCAL_DATA_DIR = Path("/tmp") / ".procman" / os.environ.get("USER", "unknown")
-
-# Fallback to home for logs/pids
+# Persistent user data directory
 DATA_DIR = Path.home() / ".procman"
-DATABASE_PATH = LOCAL_DATA_DIR / "procman.db"
+DATABASE_PATH = DATA_DIR / "procman.db"
 LOGS_DIR = DATA_DIR / "logs"
 PIDS_DIR = DATA_DIR / "pids"
+
+# Legacy location used by previous versions.
+LEGACY_DATABASE_PATH = (
+    Path("/tmp") / ".procman" / os.environ.get("USER", "unknown") / "procman.db"
+)
 
 # Log rotation settings
 MAX_LOG_BYTES = 10 * 1024 * 1024
@@ -37,7 +39,6 @@ CREATE TABLE IF NOT EXISTS processes (
 """
 
 def ensure_directories() -> None:
-    LOCAL_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    DATA_DIR.mkdir(exist_ok=True)
-    LOGS_DIR.mkdir(exist_ok=True)
-    PIDS_DIR.mkdir(exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    PIDS_DIR.mkdir(parents=True, exist_ok=True)

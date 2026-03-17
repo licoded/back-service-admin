@@ -38,3 +38,17 @@ bd sync               # Sync with git
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
 
+## Procman Incident Note (2026-03-17)
+
+Root cause:
+- `procman` metadata DB was stored under `/tmp/.procman/.../procman.db` (ephemeral path).
+- After system cleanup/restart, DB entries disappeared, so `procman list` showed empty.
+- Launchd watchdogs kept running but failed with repeated `Process '<name>' not found`.
+
+Prevention:
+- Keep process metadata DB on persistent path (`~/.procman/procman.db`), not `/tmp`.
+- Keep `/tmp` only for backward-compatible migration/read fallback.
+- After changing autostart/watchdog logic, always verify:
+  - `procman list` contains expected tasks
+  - `procman show <name>` has full command + autostart mode
+  - `~/.procman/logs/<name>.log` has no repeated `not found` loops

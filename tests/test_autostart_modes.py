@@ -242,3 +242,38 @@ def test_database_restores_from_legacy_when_primary_empty(
         assert restored.command == "sleep 1"
     finally:
         db.close()
+
+
+def test_list_all_is_read_only_for_autostart_reconcile(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = object.__new__(ProcessManager)
+    process = _process(mode="always", autostart=True, manual_stop=False)
+    process = replace(process, status="running")
+
+    class FakeDb:
+        def get_all_processes(self) -> list[Process]:
+            return [process]
+
+        def update_process_status(
+            self,
+            name: str,
+            status: str,
+            pid: int | None = None,
+            manual_stop: bool | None = None,
+        ) -> Process:
+            return replace(process, status=status, pid=pid)
+
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def ensure_loaded(self, _process: object) -> None:
+            self.calls += 1
+
+    backend = FakeBackend()
+    manager.db = FakeDb()
+    manager.autostart_backend = backend
+    monkeypatch.setattr(manager, "_is_process_running", lambda pid: True)
+
+    result = manager.list_all()
+    assert len(result) == 1
+    assert backend.calls == 0

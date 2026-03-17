@@ -367,22 +367,6 @@ class ProcessManager:
         """
         processes = self.db.get_all_processes()
 
-        # Reconcile launchd services for autostart processes.
-        for proc in processes:
-            if proc.autostart:
-                try:
-                    self.autostart_backend.ensure_loaded(
-                        AutostartProcess(
-                            name=proc.name,
-                            working_dir=proc.working_dir,
-                            require_network=proc.require_network,
-                            network_stable_seconds=proc.network_stable_seconds,
-                        )
-                    )
-                except RuntimeError:
-                    # Keep list command resilient; status check below still runs.
-                    pass
-
         # Verify and update stale statuses
         for proc in processes:
             if proc.status == "running" and not self._is_process_running(proc.pid):

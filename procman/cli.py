@@ -31,6 +31,12 @@ def _format_local_timestamp(value: str) -> str:
         return value[:19]
 
 
+def _watch_log(message: str) -> None:
+    """Write a timestamped autostart-watch log line."""
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] {message}", flush=True)
+
+
 def _render_process_list() -> None:
     """Render the managed process list."""
     manager = ProcessManager()
@@ -339,19 +345,35 @@ def autostart_watch(name: str = typer.Argument(..., help="Name of the process"))
     try:
         import time
 
+        last_running_pid: Optional[int] = None
+        waiting_for_network = False
+
         while True:
             process = manager.get_status(name)
             if process.status != "running" and process.require_network:
-                console.print(
-                    f"[dim]autostart-watch: waiting for network stability "
-                    f"({process.network_stable_seconds}s) for '{name}'[/dim]"
+                if not waiting_for_network:
+                    _watch_log(
+                        f"autostart-watch: waiting for network stability "
+                        f"({process.network_stable_seconds}s) for '{name}'"
+                    )
+                    waiting_for_network = True
+            else:
+                waiting_for_network = False
+
+            try:
+                manager.wait_for_start_conditions(name)
+                process = manager.ensure_running(name)
+            except RuntimeError as e:
+                _watch_log(f"autostart-watch: restart failed for '{name}': {e}")
+                last_running_pid = None
+                time.sleep(5)
+                continue
+
+            if process.status == "running" and process.pid != last_running_pid:
+                _watch_log(
+                    f"autostart-watch: '{name}' is running (pid={process.pid})"
                 )
-            manager.wait_for_start_conditions(name)
-            process = manager.ensure_running(name)
-            if process.status == "running":
-                console.print(
-                    f"[dim]autostart-watch: '{name}' is running (pid={process.pid})[/dim]"
-                )
+                last_running_pid = process.pid
             time.sleep(5)
     except ValueError as e:
         console.print(f"[red]✗[/red] {e}")

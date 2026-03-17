@@ -59,6 +59,18 @@ procman logs myapp --tail
 procman logs myapp --follow
 ```
 
+Autostart/restart logs are written into the same per-process log file:
+
+```bash
+~/.procman/logs/<process-name>.log
+```
+
+`autostart-watch` lines include timestamps, for example:
+
+```text
+[2026-03-17 08:58:38] autostart-watch: 'ipynb-ecnu8th-proxy' is running (pid=92207)
+```
+
 ## Autostart
 
 Enable autostart only for selected processes:

@@ -10,6 +10,9 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
+from subprocess import CompletedProcess
+
+import psutil
 
 from procman.config import LOGS_DIR
 
@@ -33,6 +36,10 @@ class AutostartBackend:
     def disable(self, name: str) -> None:
         raise NotImplementedError
 
+    def ensure_loaded(self, process: AutostartProcess) -> None:
+        """Ensure autostart integration is loaded for a process."""
+        return None
+
 
 class LaunchdAutostartBackend(AutostartBackend):
     """Manage per-user autostart on macOS using launchd agents."""
@@ -47,8 +54,9 @@ class LaunchdAutostartBackend(AutostartBackend):
         plist_path.write_bytes(self._plist_contents(process))
 
         self._run_launchctl("bootout", self._service_target(process.name), check=False)
-        self._run_launchctl("bootstrap", self._domain_target(), str(plist_path), check=False)
-        self._run_launchctl("enable", self._service_target(process.name), check=False)
+        self._run_launchctl("bootstrap", self._domain_target(), str(plist_path), check=True)
+        self._run_launchctl("enable", self._service_target(process.name), check=True)
+        self._run_launchctl("kickstart", "-k", self._service_target(process.name), check=True)
 
     def disable(self, name: str) -> None:
         plist_path = self._plist_path(name)
@@ -56,6 +64,19 @@ class LaunchdAutostartBackend(AutostartBackend):
         self._run_launchctl("disable", self._service_target(name), check=False)
         if plist_path.exists():
             plist_path.unlink()
+
+    def ensure_loaded(self, process: AutostartProcess) -> None:
+        """Re-bootstrap a missing launchd service if plist exists."""
+        if self._is_loaded(process.name):
+            return
+
+        plist_path = self._plist_path(process.name)
+        if not plist_path.exists():
+            return
+
+        self._run_launchctl("bootstrap", self._domain_target(), str(plist_path), check=True)
+        self._run_launchctl("enable", self._service_target(process.name), check=True)
+        self._run_launchctl("kickstart", "-k", self._service_target(process.name), check=True)
 
     def _plist_contents(self, process: AutostartProcess) -> bytes:
         plist = ET.Element("plist", version="1.0")
@@ -125,7 +146,11 @@ class LaunchdAutostartBackend(AutostartBackend):
     def _service_target(self, name: str) -> str:
         return f"{self._domain_target()}/{self._label(name)}"
 
-    def _run_launchctl(self, *args: str, check: bool) -> None:
+    def _is_loaded(self, name: str) -> bool:
+        completed = self._run_launchctl("print", self._service_target(name), check=False)
+        return completed.returncode == 0
+
+    def _run_launchctl(self, *args: str, check: bool) -> CompletedProcess[str]:
         completed = subprocess.run(
             ["launchctl", *args],
             capture_output=True,
@@ -135,6 +160,7 @@ class LaunchdAutostartBackend(AutostartBackend):
         if check and completed.returncode != 0:
             message = completed.stderr.strip() or completed.stdout.strip() or "launchctl failed"
             raise RuntimeError(message)
+        return completed
 
 
 class UnsupportedAutostartBackend(AutostartBackend):
@@ -184,4 +210,24 @@ def _has_network(timeout_seconds: int) -> bool:
                 return True
         except OSError:
             continue
+    return _has_active_non_loopback_interface()
+
+
+def _has_active_non_loopback_interface() -> bool:
+    """Fallback check for environments that block public DNS probes."""
+    stats = psutil.net_if_stats()
+    addrs = psutil.net_if_addrs()
+
+    for interface, interface_stats in stats.items():
+        if not interface_stats.isup:
+            continue
+        addresses = addrs.get(interface, [])
+        for address in addresses:
+            if address.family not in (socket.AF_INET, socket.AF_INET6):
+                continue
+            if address.address.startswith("127.") or address.address == "::1":
+                continue
+            if address.address.startswith("fe80:"):
+                continue
+            return True
     return False

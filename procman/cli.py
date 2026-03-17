@@ -53,6 +53,8 @@ def _render_process_list() -> None:
         table.add_column("Status", style="bold")
         table.add_column("PID", style="green")
         table.add_column("Auto", style="magenta")
+        table.add_column("Mode", style="yellow")
+        table.add_column("Manual", style="bright_black")
         table.add_column("Command", style="white")
         table.add_column("Created", style="dim")
 
@@ -68,6 +70,8 @@ def _render_process_list() -> None:
                 f"[{status_color}]{proc.status}[/{status_color}]",
                 str(proc.pid) if proc.pid else "-",
                 "yes" if proc.autostart else "no",
+                proc.autostart_mode,
+                "yes" if proc.manual_stop else "no",
                 proc.command[:50] + "..." if len(proc.command) > 50 else proc.command,
                 _format_local_timestamp(proc.created_at),
             )
@@ -86,6 +90,11 @@ def start(
         False,
         "--autostart/--no-autostart",
         help="Automatically restore this process on supported platforms",
+    ),
+    autostart_mode: str = typer.Option(
+        "always",
+        "--autostart-mode",
+        help="Autostart mode: always | on_failure | on_wake | never",
     ),
     require_network: bool = typer.Option(
         False,
@@ -108,6 +117,7 @@ def start(
             script,
             cwd,
             autostart,
+            autostart_mode,
             require_network,
             network_stable_seconds,
         )
@@ -186,6 +196,8 @@ def show(name: str = typer.Argument(..., help="Name of the process")) -> None:
         table.add_row("Status", process.status)
         table.add_row("PID", str(process.pid) if process.pid else "-")
         table.add_row("Autostart", "yes" if process.autostart else "no")
+        table.add_row("Autostart Mode", process.autostart_mode)
+        table.add_row("Manual Stop", "yes" if process.manual_stop else "no")
         table.add_row("Require Network", "yes" if process.require_network else "no")
         table.add_row("Network Stable", str(process.network_stable_seconds))
         table.add_row("Working Dir", process.working_dir or "-")
@@ -276,6 +288,11 @@ def delete(
 @autostart_app.command("enable")
 def enable_autostart(
     name: str = typer.Argument(..., help="Name of the process"),
+    autostart_mode: Optional[str] = typer.Option(
+        None,
+        "--mode",
+        help="Autostart mode: always | on_failure | on_wake | never",
+    ),
     require_network: Optional[bool] = typer.Option(
         None,
         "--require-network/--no-require-network",
@@ -294,6 +311,7 @@ def enable_autostart(
     try:
         process = manager.enable_autostart(
             name,
+            autostart_mode=autostart_mode,
             require_network=require_network,
             network_stable_seconds=network_stable_seconds,
         )
@@ -326,6 +344,12 @@ def autostart_run(name: str = typer.Argument(..., help="Name of the process")) -
     manager = ProcessManager()
 
     try:
+        process = manager.get_status(name)
+        if process.status == "running":
+            return
+        if not manager.should_restart_process(process, wake_event=True):
+            return
+        manager.wait_for_start_conditions(name)
         manager.ensure_running(name)
     except ValueError as e:
         console.print(f"[red]✗[/red] {e}")
@@ -345,20 +369,53 @@ def autostart_watch(name: str = typer.Argument(..., help="Name of the process"))
     try:
         import time
 
+        wake_gap_seconds = 15
         last_running_pid: Optional[int] = None
         waiting_for_network = False
+        manual_hold_logged = False
+        last_tick = time.monotonic()
 
         while True:
+            now = time.monotonic()
+            wake_event = (now - last_tick) > wake_gap_seconds
+            last_tick = now
+
             process = manager.get_status(name)
-            if process.status != "running" and process.require_network:
-                if not waiting_for_network:
-                    _watch_log(
-                        f"autostart-watch: waiting for network stability "
-                        f"({process.network_stable_seconds}s) for '{name}'"
-                    )
-                    waiting_for_network = True
-            else:
+            if process.status == "running":
                 waiting_for_network = False
+                manual_hold_logged = False
+                if process.pid != last_running_pid:
+                    _watch_log(
+                        f"autostart-watch: '{name}' is running (pid={process.pid})"
+                    )
+                    last_running_pid = process.pid
+                time.sleep(5)
+                continue
+
+            if process.manual_stop:
+                if not manual_hold_logged:
+                    _watch_log(
+                        f"autostart-watch: '{name}' was manually stopped; "
+                        "skip auto-restart until manual start/restart"
+                    )
+                    manual_hold_logged = True
+                last_running_pid = None
+                time.sleep(5)
+                continue
+
+            manual_hold_logged = False
+            should_restart = manager.should_restart_process(process, wake_event)
+            if not should_restart:
+                last_running_pid = None
+                time.sleep(5)
+                continue
+
+            if process.require_network and not waiting_for_network:
+                _watch_log(
+                    f"autostart-watch: waiting for network stability "
+                    f"({process.network_stable_seconds}s) for '{name}'"
+                )
+                waiting_for_network = True
 
             try:
                 manager.wait_for_start_conditions(name)

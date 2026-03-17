@@ -15,6 +15,27 @@ from procman.config import LOGS_DIR
 from procman.daemonize import daemonize_process, remove_pid_file
 from procman.database import Database, Process
 
+AUTOSTART_MODES = {
+    "always": (True, True),
+    "on_failure": (True, False),
+    "on_wake": (False, True),
+    "never": (False, False),
+}
+
+
+def normalize_autostart_mode(mode: str) -> str:
+    """Normalize and validate autostart mode."""
+    normalized = mode.strip().lower().replace("-", "_")
+    if normalized not in AUTOSTART_MODES:
+        allowed = ", ".join(sorted(AUTOSTART_MODES))
+        raise ValueError(f"Invalid autostart mode '{mode}'. Expected one of: {allowed}")
+    return normalized
+
+
+def autostart_mode_flags(mode: str) -> tuple[bool, bool]:
+    """Return (restart_on_failure, restart_on_wake) flags for a mode."""
+    return AUTOSTART_MODES[normalize_autostart_mode(mode)]
+
 
 class ProcessManager:
     """Manages process lifecycle: start, stop, restart, status."""
@@ -30,6 +51,7 @@ class ProcessManager:
         command: str,
         working_dir: Optional[str] = None,
         autostart: bool = False,
+        autostart_mode: str = "always",
         require_network: bool = False,
         network_stable_seconds: int = 15,
     ) -> Process:
@@ -56,6 +78,8 @@ class ProcessManager:
             # Clean up stale record
             self.db.delete_process(name)
 
+        resolved_mode = normalize_autostart_mode(autostart_mode)
+
         # Set up log file
         log_path = LOGS_DIR / f"{name}.log"
 
@@ -70,8 +94,10 @@ class ProcessManager:
                 working_dir,
                 None,
                 autostart,
+                resolved_mode,
                 require_network,
                 network_stable_seconds,
+                False,
                 "failed",
             )
             raise RuntimeError(f"Failed to start process: {e}")
@@ -90,13 +116,20 @@ class ProcessManager:
             working_dir,
             pid,
             autostart,
+            resolved_mode,
             require_network,
             network_stable_seconds,
+            False,
             "running",
         )
 
         if autostart:
-            self.enable_autostart(name, require_network, network_stable_seconds)
+            self.enable_autostart(
+                name,
+                autostart_mode=resolved_mode,
+                require_network=require_network,
+                network_stable_seconds=network_stable_seconds,
+            )
             process = self.db.get_process_by_name(name)
 
         return process
@@ -119,8 +152,12 @@ class ProcessManager:
 
         if not self._is_process_running(process.pid):
             # Process is not actually running, update status
-            self.db.update_process_status(name, "stopped")
+            self.db.update_process_status(name, "stopped", manual_stop=True)
             raise ValueError(f"Process '{name}' is not running")
+
+        # Mark manual stop intent before terminating the process to avoid
+        # watchdog race windows that could otherwise restart it.
+        self.db.update_process_manual_stop(name, True)
 
         # Kill the process
         self._kill_process(process.pid)
@@ -129,7 +166,7 @@ class ProcessManager:
         remove_pid_file(name)
 
         # Update database
-        return self.db.update_process_status(name, "stopped")
+        return self.db.update_process_status(name, "stopped", manual_stop=True)
 
     def restart(self, name: str) -> Process:
         """Restart a process, or start a stopped process.
@@ -165,6 +202,7 @@ class ProcessManager:
             process.command,
             process.working_dir,
             process.autostart,
+            process.autostart_mode,
             process.require_network,
             process.network_stable_seconds,
         )
@@ -197,6 +235,7 @@ class ProcessManager:
     def enable_autostart(
         self,
         name: str,
+        autostart_mode: Optional[str] = None,
         require_network: Optional[bool] = None,
         network_stable_seconds: Optional[int] = None,
     ) -> Process:
@@ -213,6 +252,9 @@ class ProcessManager:
             if network_stable_seconds is None
             else network_stable_seconds
         )
+        resolved_mode = normalize_autostart_mode(
+            process.autostart_mode if autostart_mode is None else autostart_mode
+        )
 
         self.autostart_backend.enable(
             AutostartProcess(
@@ -225,6 +267,7 @@ class ProcessManager:
         updated = self.db.update_process_autostart_settings(
             name,
             True,
+            resolved_mode,
             resolved_require_network,
             resolved_stable_seconds,
         )
@@ -242,6 +285,7 @@ class ProcessManager:
         updated = self.db.update_process_autostart_settings(
             name,
             False,
+            "never",
             process.require_network,
             process.network_stable_seconds,
         )
@@ -249,12 +293,28 @@ class ProcessManager:
             raise RuntimeError(f"Failed to update autostart for '{name}'")
         return updated
 
-    def ensure_running(self, name: str) -> Process:
+    def ensure_running(self, name: str, respect_manual_stop: bool = True) -> Process:
         """Ensure a configured process is running."""
         process = self.get_status(name)
         if process.status == "running":
             return process
+        if respect_manual_stop and process.manual_stop:
+            return process
         return self.restart(name)
+
+    def should_restart_process(self, process: Process, wake_event: bool) -> bool:
+        """Decide whether a stopped process should be auto-restored now."""
+        if not process.autostart:
+            return False
+        if process.manual_stop:
+            return False
+
+        restart_on_failure, restart_on_wake = autostart_mode_flags(process.autostart_mode)
+        if wake_event and restart_on_wake:
+            return True
+        if not wake_event and restart_on_failure:
+            return True
+        return False
 
     def wait_for_start_conditions(self, name: str) -> Process:
         """Wait for any configured preconditions before restoring a process."""
@@ -287,7 +347,12 @@ class ProcessManager:
         is_running = self._is_process_running(process.pid)
         if is_running and process.status != "running":
             # Process is running but DB says otherwise - update
-            return self.db.update_process_status(name, "running", process.pid)
+            return self.db.update_process_status(
+                name,
+                "running",
+                process.pid,
+                manual_stop=False,
+            )
         elif not is_running and process.status == "running":
             # Process died but DB doesn't know - update
             return self.db.update_process_status(name, "stopped")
@@ -381,19 +446,27 @@ class ProcessManager:
             # Try graceful termination first
             proc.terminate()
 
-            # Wait up to 5 seconds
-            try:
-                proc.wait(timeout=5)
-            except psutil.TimeoutExpired:
-                # Force kill if graceful didn't work
+            # Wait up to 5 seconds.
+            if not self._wait_for_process_exit(pid, timeout=5):
+                # Force kill if graceful termination did not work.
                 proc.kill()
-                proc.wait(timeout=2)
+                if not self._wait_for_process_exit(pid, timeout=2):
+                    raise RuntimeError(f"Failed to kill process {pid}: timed out")
 
         except psutil.NoSuchProcess:
             # Already dead
             pass
         except Exception as e:
             raise RuntimeError(f"Failed to kill process {pid}: {e}")
+
+    def _wait_for_process_exit(self, pid: int, timeout: float) -> bool:
+        """Wait until a PID is no longer running."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not self._is_process_running(pid):
+                return True
+            time.sleep(0.1)
+        return not self._is_process_running(pid)
 
     def close(self) -> None:
         """Close database connection."""

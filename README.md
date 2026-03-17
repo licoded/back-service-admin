@@ -30,6 +30,7 @@ procman start "python myscript.py" --name myapp
 procman start "./myscript.sh" --name myscript --cwd /path/to/dir
 procman start "uv run main.py" --name webapp
 procman start "python worker.py" --name worker --autostart
+procman start "python worker.py" --name worker --autostart --autostart-mode on_failure
 procman start "python worker.py" --name worker --autostart --require-network
 ```
 
@@ -79,7 +80,19 @@ Enable autostart only for selected processes:
 procman autostart enable myapp
 procman autostart disable myapp
 procman autostart enable myapp --require-network --network-stable-seconds 20
+procman autostart enable myapp --mode on_wake
 ```
+
+Autostart mode values:
+- `always`: restart on both failure and wake
+- `on_failure`: restart only after failure
+- `on_wake`: restart only on wake events
+- `never`: never auto-restart
+
+Manual stop behavior:
+- `procman stop <name>` marks the process as manually stopped.
+- Manually stopped processes are not auto-restarted, including after sleep/wake.
+- Use `procman start <... --name ...>` or `procman restart <name>` to clear manual stop.
 
 Or configure it when starting the process:
 

@@ -25,8 +25,11 @@ CREATE TABLE IF NOT EXISTS processes (
     working_dir TEXT,
     pid INTEGER,
     autostart INTEGER NOT NULL DEFAULT 0,
+    autostart_mode TEXT NOT NULL DEFAULT 'always'
+        CHECK(autostart_mode IN ('always', 'on_failure', 'on_wake', 'never')),
     require_network INTEGER NOT NULL DEFAULT 0,
     network_stable_seconds INTEGER NOT NULL DEFAULT 15,
+    manual_stop INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL CHECK(status IN ('running', 'stopped', 'failed')),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP

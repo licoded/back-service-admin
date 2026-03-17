@@ -17,8 +17,10 @@ class Process:
     working_dir: Optional[str]
     pid: Optional[int]
     autostart: bool
+    autostart_mode: str
     require_network: bool
     network_stable_seconds: int
+    manual_stop: bool
     status: str
     created_at: str
     updated_at: str
@@ -56,6 +58,13 @@ class Database:
             self._add_column_if_missing(
                 "ALTER TABLE processes ADD COLUMN autostart INTEGER NOT NULL DEFAULT 0"
             )
+        added_autostart_mode = False
+        if "autostart_mode" not in columns:
+            added_autostart_mode = True
+            self._add_column_if_missing(
+                "ALTER TABLE processes "
+                "ADD COLUMN autostart_mode TEXT NOT NULL DEFAULT 'always'"
+            )
         if "require_network" not in columns:
             self._add_column_if_missing(
                 "ALTER TABLE processes ADD COLUMN require_network INTEGER NOT NULL DEFAULT 0"
@@ -65,6 +74,21 @@ class Database:
                 "ALTER TABLE processes "
                 "ADD COLUMN network_stable_seconds INTEGER NOT NULL DEFAULT 15"
             )
+        if "manual_stop" not in columns:
+            self._add_column_if_missing(
+                "ALTER TABLE processes ADD COLUMN manual_stop INTEGER NOT NULL DEFAULT 0"
+            )
+        if added_autostart_mode:
+            # Map legacy records: autostart-enabled jobs keep old behavior (`always`).
+            self.conn.execute(
+                """
+                UPDATE processes
+                SET autostart_mode = CASE
+                    WHEN autostart = 1 THEN 'always'
+                    ELSE 'never'
+                END
+                """
+            )
 
     def create_process(
         self,
@@ -73,8 +97,10 @@ class Database:
         working_dir: Optional[str] = None,
         pid: Optional[int] = None,
         autostart: bool = False,
+        autostart_mode: str = "always",
         require_network: bool = False,
         network_stable_seconds: int = 15,
+        manual_stop: bool = False,
         status: str = "running",
     ) -> Process:
         """Create a new process record."""
@@ -86,11 +112,13 @@ class Database:
                 working_dir,
                 pid,
                 autostart,
+                autostart_mode,
                 require_network,
                 network_stable_seconds,
+                manual_stop,
                 status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 name,
@@ -98,8 +126,10 @@ class Database:
                 working_dir,
                 pid,
                 int(autostart),
+                autostart_mode,
                 int(require_network),
                 network_stable_seconds,
+                int(manual_stop),
                 status,
             ),
         )
@@ -142,26 +172,68 @@ class Database:
         name: str,
         status: str,
         pid: Optional[int] = None,
+        manual_stop: Optional[bool] = None,
     ) -> Optional[Process]:
         """Update process status and optionally PID."""
         if pid is not None:
-            cursor = self.conn.execute(
-                """
-                UPDATE processes
-                SET status = ?, pid = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE name = ?
-                """,
-                (status, pid, name),
-            )
+            if manual_stop is None:
+                cursor = self.conn.execute(
+                    """
+                    UPDATE processes
+                    SET status = ?, pid = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE name = ?
+                    """,
+                    (status, pid, name),
+                )
+            else:
+                cursor = self.conn.execute(
+                    """
+                    UPDATE processes
+                    SET status = ?, pid = ?, manual_stop = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE name = ?
+                    """,
+                    (status, pid, int(manual_stop), name),
+                )
         else:
-            cursor = self.conn.execute(
-                """
-                UPDATE processes
-                SET status = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE name = ?
-                """,
-                (status, name),
-            )
+            clear_pid = status in {"stopped", "failed"}
+            if manual_stop is None:
+                if clear_pid:
+                    cursor = self.conn.execute(
+                        """
+                        UPDATE processes
+                        SET status = ?, pid = NULL, updated_at = CURRENT_TIMESTAMP
+                        WHERE name = ?
+                        """,
+                        (status, name),
+                    )
+                else:
+                    cursor = self.conn.execute(
+                        """
+                        UPDATE processes
+                        SET status = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE name = ?
+                        """,
+                        (status, name),
+                    )
+            else:
+                if clear_pid:
+                    cursor = self.conn.execute(
+                        """
+                        UPDATE processes
+                        SET status = ?, pid = NULL, manual_stop = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE name = ?
+                        """,
+                        (status, int(manual_stop), name),
+                    )
+                else:
+                    cursor = self.conn.execute(
+                        """
+                        UPDATE processes
+                        SET status = ?, manual_stop = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE name = ?
+                        """,
+                        (status, int(manual_stop), name),
+                    )
         self.conn.commit()
         return self.get_process_by_name(name) if cursor.rowcount > 0 else None
 
@@ -195,18 +267,51 @@ class Database:
         self,
         name: str,
         enabled: bool,
+        autostart_mode: str,
         require_network: bool,
         network_stable_seconds: int,
+        manual_stop: Optional[bool] = None,
     ) -> Optional[Process]:
         """Update autostart-related configuration."""
+        if manual_stop is None:
+            cursor = self.conn.execute(
+                """
+                UPDATE processes
+                SET autostart = ?, autostart_mode = ?, require_network = ?,
+                    network_stable_seconds = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE name = ?
+                """,
+                (int(enabled), autostart_mode, int(require_network), network_stable_seconds, name),
+            )
+        else:
+            cursor = self.conn.execute(
+                """
+                UPDATE processes
+                SET autostart = ?, autostart_mode = ?, require_network = ?,
+                    network_stable_seconds = ?, manual_stop = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE name = ?
+                """,
+                (
+                    int(enabled),
+                    autostart_mode,
+                    int(require_network),
+                    network_stable_seconds,
+                    int(manual_stop),
+                    name,
+                ),
+            )
+        self.conn.commit()
+        return self.get_process_by_name(name) if cursor.rowcount > 0 else None
+
+    def update_process_manual_stop(self, name: str, manual_stop: bool) -> Optional[Process]:
+        """Update manual stop flag."""
         cursor = self.conn.execute(
             """
             UPDATE processes
-            SET autostart = ?, require_network = ?, network_stable_seconds = ?,
-                updated_at = CURRENT_TIMESTAMP
+            SET manual_stop = ?, updated_at = CURRENT_TIMESTAMP
             WHERE name = ?
             """,
-            (int(enabled), int(require_network), network_stable_seconds, name),
+            (int(manual_stop), name),
         )
         self.conn.commit()
         return self.get_process_by_name(name) if cursor.rowcount > 0 else None
@@ -227,8 +332,10 @@ class Database:
         """Convert a SQLite row to a Process object."""
         data = dict(row)
         data["autostart"] = bool(data.get("autostart", 0))
+        data["autostart_mode"] = str(data.get("autostart_mode", "always"))
         data["require_network"] = bool(data.get("require_network", 0))
         data["network_stable_seconds"] = int(data.get("network_stable_seconds", 15))
+        data["manual_stop"] = bool(data.get("manual_stop", 0))
         return Process(**data)
 
     def _add_column_if_missing(self, sql: str) -> None:
